@@ -1,3 +1,11 @@
+<!-- Token Radar's dashboard page: a static shell; app.js builds the whole board inside #board.
+     The page carries no data of its own. data.js (written beside this page by main.ts) assigns
+     the snapshot's board, the live-token set and the model to window.RADAR, and app.js reads it.
+     The two scripts must load in this order: data.js first, so window.RADAR exists before app.js
+     runs, then app.js, which renders the board, the filters, the model panel and the detail
+     drawer. There is no network call anywhere: every byte the page shows is in data.js.
+     The skip link jumps keyboard users straight to the board, and aria-busy="true" on the main
+     element tells assistive technology the board is being built until app.js sets it false. -->
 <!doctype html>
 <html lang="en">
 <head>

@@ -13,15 +13,38 @@
 //
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json
+//
+// What one run writes, in order. board.json is the ranked board (rows, strongest implied value
+// first). data.js is the dashboard's dataset, the same rows in compact form, written beside the
+// page so the dashboard needs no network. dashboard/ is this repository's dashboard copied
+// whole (index.html, app.css, app.js — at least three files, or the run refuses). screenshots/
+// is this repository's screenshots copied whole (three images: the board, a detail view, a
+// filtered view, each under the size cap, or the run refuses). dossier.json is written last,
+// because the scorer rebuilds it from this /output and compares bytes: anything written after
+// it would make the dossier stale. The run prints two lines to stdout — the counts, then the
+// list of files written — and nothing else on a normal run.
+//
+// The run refuses, with a message on stderr and exit code 1, when the snapshot is missing, when
+// the model writes a board the gate will not take (boardIssue, then validateBoard), when the
+// dashboard or the screenshots are short, when a screenshot's name is not a safe filename, or
+// when a screenshot is over the 512 KiB cap. --help prints usage and exits 0 without reading
+// anything. The only environment variable the program reads is MAKEFUN_OUTPUT_DIR, which sets
+// the output directory when --output is not given.
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
+import { validateBoard } from './lib/model.ts';
 import { buildDossier } from './vendor/makefun-board.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 
+// The caps are the gate's, not the program's: the dossier's text is capped at 64 KiB, the
+// screenshots at four images of 512 KiB each, and a screenshot's name must be a safe filename
+// (letters, digits and . _ -, 1 to 128 characters, starting with a letter, digit or underscore).
+// The program checks them before writing the dossier, because the dossier is built from this
+// /output and a file that breaks the cap would make the dossier disagree with the gate.
 /** The scorer's own caps: the text cap shapes the bytes, the rest refuse. */
 const TEXT_MAX_BYTES = 65_536;
 const SCREENSHOT_CAPS = { max: 4, max_bytes: 524_288 };
@@ -41,6 +64,24 @@ function fail(message: string): never {
   process.exit(1);
 }
 
+// --help (or -h) prints usage and exits 0, before anything is read: a reader checking how to
+// run the program should not need a snapshot on disk. The usage names every flag, the default
+// input and output, and what the run writes, so it is the whole manual in one screen.
+if (process.argv.includes('--help') || process.argv.includes('-h')) {
+  process.stdout.write(
+    'token radar: rank pre-token protocols by implied value\n' +
+      'usage: node main.ts --input <snapshot.json|directory> [--output <dir>]\n' +
+      '  --input   snapshot file, or a directory holding snapshot.json (default /input)\n' +
+      '  --output  where to write board.json, data.js, dashboard/, screenshots/ and dossier.json\n' +
+      '            (default /output, or MAKEFUN_OUTPUT_DIR when set)\n' +
+      '  --help    print this usage and exit\n' +
+      'reads the sealed snapshot, scores every pre-token protocol with the radar-2 model,\n' +
+      'writes the ranked board, the dashboard data, copies dashboard/ and screenshots/,\n' +
+      'and writes the dossier the judge reads.\n',
+  );
+  process.exit(0);
+}
+
 const inputArg = arg('input', '/input');
 const inputFile = inputArg.endsWith('.json') ? inputArg : join(inputArg, 'snapshot.json');
 if (!existsSync(inputFile)) {
@@ -52,6 +93,14 @@ const snapshot = parseSnapshot(readFileSync(inputFile, 'utf8'));
 const { board, radar } = buildRadar(snapshot);
 const issue = boardIssue(board, snapshot);
 if (issue !== null) fail(`the model wrote a board the gate refuses: ${issue}`);
+
+// validateBoard collects every problem, where boardIssue stops at the first: a board that fails
+// both is reported in full, so one fix does not hide the next failure behind it. An empty list
+// means the board is clean, and the run goes on to write it.
+const problems = validateBoard(board, snapshot.watchlist);
+if (problems.length > 0) {
+  fail(`the model wrote a board the gate refuses:\n${problems.map((p) => `  - ${p}`).join('\n')}`);
+}
 
 mkdirSync(out, { recursive: true });
 writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: board })}\n`);
@@ -85,6 +134,9 @@ for (const name of shots) {
 }
 
 // The dossier is written last: the scorer rebuilds it from this /output and compares bytes.
+// A file written after the dossier would make the dossier stale, and a dossier written before
+// the dashboard or the screenshots would describe files that are not there yet. So the order is
+// board, data, dashboard, screenshots, dossier — and the dossier is the last write of the run.
 writeFileSync(
   join(out, 'dossier.json'),
   buildDossier(out, { text_max_bytes: TEXT_MAX_BYTES, screenshots: SCREENSHOT_CAPS, dashboard: { max_files: 400, max_bytes: 4_194_304 } }),

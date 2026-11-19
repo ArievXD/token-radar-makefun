@@ -6,6 +6,17 @@
 // regenerates its farm plan with the same derivation main.ts writes to board.json, so the page's
 // code and the board's data are visibly the same arithmetic. window.RADAR_API exposes both
 // functions so the build can verify every row against board.json.
+//
+// How the page is organised, for a reader opening it for the first time. The whole script is
+// one immediately-invoked function in strict mode, so nothing leaks into the global scope except
+// window.RADAR (the data, written by main.ts) and window.RADAR_API (the two functions the build
+// uses to verify the page against board.json). The state object holds everything the view
+// depends on — the search text, the category and chain filters, the watchlist toggle, the
+// minimum TVL, the active tab, the sort key and direction, and the selected row — and render()
+// rebuilds the page from that state on every change. The state is written into the URL hash on
+// every change and read back on load, so a filtered view, a sort, or an open detail drawer is a
+// link you can share: readHash on load, writeHash on every state change. There is no framework
+// and no network call anywhere in the file; the only data source is window.RADAR.
 (function () {
   'use strict';
 
@@ -16,6 +27,13 @@
   var watchlistSet = {};
   (DATA.watchlist_slugs || []).forEach(function (s) { watchlistSet[s] = true; });
 
+  // The formatters are the page's only number handling, and each one guards its input: a null,
+  // undefined or non-finite value renders as 'n/a' instead of crashing the table. fmtUsd shortens
+  // large values ($1.24B, $718.9M, $45K) so the table stays readable, and falls back to the full
+  // currency format for small ones. fmtPct always shows a sign and two decimals, so +20.00% and
+  // -5.50% sort visually by direction. fmtAge turns a day count into years past 365 days and
+  // days below it, and says 'unknown' when the listing date was never recorded — the same
+  // unknown-age rule the model scores at 180 days.
   var usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
   function fmtUsd(n) {
     if (n === null || n === undefined || !isFinite(n)) return 'n/a';
@@ -48,6 +66,13 @@
     return Math.max(1, Math.round(row.tvl_usd * model.base_multiple * growthMult * spike * maturity * opacity));
   }
 
+  // el() is the page's only way to build DOM: tag, attributes, then children. An attribute
+  // named 'class' sets the class, 'text' sets the text content, 'html' sets inner HTML, a name
+  // starting with 'on' (onclick, onkeydown) adds a listener, and anything else becomes an HTML
+  // attribute unless it is null or undefined. Children may be strings (become text nodes),
+  // nodes, null (skipped) or arrays (each child appended in turn). Every part of the page —
+  // header, controls, tables, model panel, detail drawer — is built through el(), so there is
+  // no template string and no innerHTML carrying user data anywhere except the one 'html' case.
   function el(tag, attrs) {
     var node = document.createElement(tag);
     if (attrs) {
@@ -71,6 +96,13 @@
 
   // The farm plan is the same derivation main.ts writes to board.json: category, chains, TVL and age
   // decide the action, the capital, the hold and every cost and time. No name is special-cased.
+  // The seven steps are built in the same order the board carries them — fresh wallet, main
+  // position, weekly action, second position, hold, claim warning, farm log — and the capital
+  // tiers ($250 / $150 / $100 / $50 by TVL) and the hold (60 / 45 / 30 days by age, 45 when
+  // unknown) are the same numbers lib/model.ts uses, so a reader who compares the drawer's plan
+  // with the board's plan for the same protocol finds the same seven steps. stepText is the
+  // same shape too: action, then " Cost: ... Time: ...", trimmed to 600 characters and padded
+  // to 20, so the drawer's split on ' Cost: ' always finds the seam.
   function chainOf(p) { return p.chains && p.chains.length > 0 ? p.chains[0] : 'its main chain'; }
   function secondChainOf(p) { return p.chains && p.chains.length > 1 ? p.chains[1] : null; }
   function capitalFor(p) {
@@ -143,6 +175,14 @@
   }
   window.RADAR_API = { impliedOf: impliedOf, farmSteps: farmSteps };
 
+  // The hash is the page's shareable state. readHash runs once on load and restores the search,
+  // the filters, the watchlist toggle, the minimum TVL, the selected row and the tab from the
+  // fragment, so a link like #q=lend&tab=live opens exactly the view it names. writeHash runs on
+  // every state change and writes the same parameters back with replaceState — replace, not
+  // push, so typing in the search box does not fill the browser's history with one entry per
+  // keystroke. An empty hash is cleared back to the plain path, so the default view has a clean
+  // URL. The selected row's slug travels as 'p', which is also how the detail drawer re-opens
+  // after a reload.
   function readHash() {
     var hash = window.location.hash.replace(/^#/, '');
     if (!hash) return;
@@ -169,6 +209,14 @@
     else window.history.replaceState(null, '', window.location.pathname + window.location.search);
   }
 
+  // rows() is the filter: category, chain, watchlist-only, minimum TVL, then the search text,
+  // which matches against the name, the slug, the category and the chains joined together, all
+  // lower-cased, so "lend eth" finds a lending protocol on Ethereum by either word. sortedRows()
+  // is the sort: implied value by default (descending, dir -1), with name, TVL, 7d growth and age
+  // as the other keys — growth sorts unreported growth last (it is not zero, it is unknown) and
+  // age sorts unknown age last (it is not newborn, it is unproven) — and the slug as the
+  // tie-break so the order is deterministic. Clicking a column header twice flips the direction;
+  // clicking another column switches to it descending.
   function rows() {
     var q = state.q.trim().toLowerCase();
     return DATA.rows.filter(function (r) {
@@ -196,6 +244,15 @@
     });
   }
 
+  // header() and lede() are the page's top: the brand and the snapshot's date, source and model
+  // version, then the headline (how many watchlist protocols, ranked by implied value) and the
+  // four facts — watchlist covered, pre-token rows scored, early rows below the floor, live-token
+  // protocols set aside. controls() is the filter bar: search, category, chain, minimum TVL,
+  // the watchlist-only checkbox, the Pre-token / Live token tabs, and the count of rows shown.
+  // Every control writes the hash and re-renders on change, so the page never needs a submit
+  // button. sortHeader() is one sortable column: a button that flips direction when it is the
+  // active sort and shows a ' v' or ' ^' marker, and switches to the column descending when it
+  // is not.
   function header() {
     return el('header', { class: 'top' },
       el('div', { class: 'brand' }, el('span', { class: 'mark' }), el('span', { class: 'brand-name', text: 'Token Radar' })),
@@ -267,6 +324,14 @@
     );
   }
 
+  // boardTable() is the ranked board: one row per protocol, strongest implied value first, with
+  // the rank chip (the top three get the accent border), the name with its category and chains
+  // and a WATCHLIST tag when the slug is watched, TVL, seven-day growth (green when positive,
+  // red when negative, 'n/a' when unreported), age, and the implied value with a bar scaled to
+  // the strongest row in the current view — the bar is relative to what is shown, so filtering
+  // re-scales it. A row opens its detail drawer on click, and on Enter or Space when focused,
+  // so the table is usable from the keyboard. When the filter matches nothing, the table is
+  // replaced by an empty state with a Clear filters button that resets every filter at once.
   function boardTable() {
     var list = sortedRows(rows());
     if (list.length === 0) {
@@ -323,6 +388,13 @@
     );
   }
 
+  // liveTable() is the Live token tab: the protocols that already trade, shown with their market
+  // cap instead of a model value, because a market cap is a fact and an implied value is an
+  // estimate. The caption says so plainly, so a reader never mistakes a live row for a ranked
+  // one. modelPanel() is the formula, stated with the model's own constants so the page and the
+  // board can never disagree about it, plus the plain-language reading of each multiplier: TVL
+  // is the size of the prize, growth is weighted hard but a spike is haircut, age is survival
+  // with no token, and the early radar is every rankable protocol below the floor.
   function liveTable() {
     var tbody = el('tbody');
     DATA.live.forEach(function (r) {
@@ -361,6 +433,16 @@
   var dialog = el('dialog', { class: 'detail', id: 'detail', 'aria-labelledby': 'detail-title' });
   dialog.addEventListener('close', function () { state.selected = null; writeHash(); });
 
+  // openDetail() is the drawer: one protocol, its rank and whether it is watchlist or early
+  // radar, the implied-value equation with every input and every multiplier (with a note when
+  // the spike haircut or the opacity discount applied), and the seven-step farm plan. The page
+  // recomputes the row's implied value here with impliedOf and says whether it matches
+  // board.json — a mismatch would mean the data is stale, and the drawer says so instead of
+  // hiding it. The drawer is a native dialog shown modally, closes on Escape and on its Close
+  // button, and writes the selected slug into the hash so a reload re-opens the same protocol.
+  // render() rebuilds the shell — header, lede, controls, the active tab's table, and the model
+  // panel on the pre-token tab — from the state, then re-opens the drawer when a row is
+  // selected. It runs once on load (after readHash) and after every state change.
   function openDetail(slug) {
     var row = DATA.rows.filter(function (r) { return r.slug === slug; })[0];
     if (!row) return;
